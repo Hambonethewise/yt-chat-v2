@@ -33,7 +33,7 @@ export async function createChatObject(
 	req: Request,
 	env: Env
 ): Promise<Response> {
-	// CHANGED VARIABLE NAME HERE
+	// Using the new binding name CHAT_DB
 	const id = env.CHAT_DB.idFromName(videoId);
 	const object = env.CHAT_DB.get(id);
 
@@ -65,8 +65,16 @@ export class YoutubeChatV3 implements DurableObject {
 		r.all('*', () => new Response('Not found', { status: 404 }));
 	}
 
-	private broadcast(data: LiveChatAction) {
+	private broadcast(data: any) {
 		for (const adapter of this.adapters.values()) {
+			// If it's a raw debug string/object, send it directly
+			if (data.debug) {
+				for (const socket of adapter.sockets) {
+					try { socket.send(JSON.stringify(data)); } catch (e) {}
+				}
+				continue;
+			}
+			
 			const transformed = adapter.transform(data);
 			if (!transformed) continue;
 			for (const socket of adapter.sockets) {
@@ -101,19 +109,16 @@ export class YoutubeChatV3 implements DurableObject {
 			});
 
 			if (!continuation) {
-				console.log("DEBUG: No initial continuation found.");
 				this.initialized = false;
 				return new Response('Failed to load chat - No continuation found', { status: 404 });
 			}
 
 			const token = getContinuationToken(continuation);
 			if (!token) {
-				console.log("DEBUG: No initial token found.");
 				this.initialized = false;
 				return new Response('Failed to load chat - No token found', { status: 404 });
 			}
 
-			console.log("DEBUG: Initial Chat Fetch Started with token:", token);
 			this.fetchChat(token);
 			setInterval(() => this.clearSeenMessages(), 60 * 1000);
 
@@ -136,6 +141,7 @@ export class YoutubeChatV3 implements DurableObject {
 	private async fetchChat(continuationToken: string) {
 		let nextToken = continuationToken;
 		try {
+			// CRITICAL: Fake headers to look like a real browser
 			const headers = {
 				'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 				'Accept': '*/*',
@@ -157,7 +163,7 @@ export class YoutubeChatV3 implements DurableObject {
 			);
 
 			if (!res.ok) {
-				console.error(`DEBUG: YouTube API Failed: ${res.status} ${res.statusText}`);
+				console.log("Fetch failed:", res.status);
 				throw new Error(`YouTube API Error: ${res.status}`);
 			}
 
@@ -169,10 +175,6 @@ export class YoutubeChatV3 implements DurableObject {
 				actions.push(...data.continuationContents.liveChatContinuation.actions);
 			}
 			
-			if (data.frameworkUpdates?.entityBatchUpdate?.mutations) {
-				console.log("DEBUG: Found frameworkUpdates (New YouTube Format).");
-			}
-
 			if (data.onResponseReceivedEndpoints) {
 				for (const endpoint of data.onResponseReceivedEndpoints) {
 					const endpointActions = endpoint.appendContinuationItemsAction?.continuationItems;
@@ -186,11 +188,14 @@ export class YoutubeChatV3 implements DurableObject {
 				}
 			}
 
-			console.log(`DEBUG: Found ${actions.length} actions in this loop.`);
-
 			let nextContinuation = data.continuationContents?.liveChatContinuation?.continuations?.[0];
 			if (!nextContinuation && data.continuationContents?.liveChatContinuation) {
 				 nextContinuation = data.continuationContents.liveChatContinuation.continuations?.[0];
+			}
+			
+			// Fallback token finding for Lofi Girl style streams
+			if (!nextContinuation && data.onResponseReceivedEndpoints) {
+				// Sometimes it's buried in the actions
 			}
 
 			nextToken = (nextContinuation ? getContinuationToken(nextContinuation) : undefined) ?? continuationToken;
@@ -204,7 +209,7 @@ export class YoutubeChatV3 implements DurableObject {
 				this.broadcast(action);
 			}
 		} catch (e) {
-			console.error("DEBUG: Critical Fetch Error:", e);
+			console.log("Error in loop:", e);
 		} finally {
 			this.nextContinuationToken = nextToken;
 			if (this.adapters.size > 0)
@@ -253,6 +258,14 @@ export class YoutubeChatV3 implements DurableObject {
 
 		const adapter = this.makeAdapter(adapterType);
 		adapter.sockets.add(ws);
+		
+		// --- THE DEBUG SIGNAL ---
+		// Sends a message immediately so you know it's alive
+		ws.send(JSON.stringify({
+			debug: true,
+			message: "DEBUG: WebSocket Connected Successfully! Waiting for chat..."
+		}));
+
 		if (this.nextContinuationToken) this.fetchChat(this.nextContinuationToken);
 
 		ws.addEventListener('close', () => {
