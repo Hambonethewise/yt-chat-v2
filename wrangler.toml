@@ -7,8 +7,9 @@ compatibility_flags = ["nodejs_compat"]
 TRUFFLE_API_BASE = 'https://v2.truffle.vip'
 
 [durable_objects]
-bindings = [{ name = "YOUTUBE_CHAT", class_name = "YoutubeChat" }]
+# Pointing to the new V2 Class
+bindings = [{ name = "YOUTUBE_CHAT", class_name = "YoutubeChatV2" }]
 
 [[migrations]]
-tag = "fix-sqlite-v3"
-new_sqlite_classes = ["YoutubeChat"]
+tag = "v2-init" # New tag to force a fresh start
+new_sqlite_classes = ["YoutubeChatV2"] # Creating the V2 database in Free Mode
