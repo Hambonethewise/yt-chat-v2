@@ -43,9 +43,10 @@ export class YoutubeChatV3 implements DurableObject {
 	private router: Router<Request, IHTTPMethods>;
 	private channelId!: string;
 	private initialData!: VideoData['initialData'];
-	// Note: We store the raw keys now, not the full config object
+	// Storage for our surgical keys
 	private apiKey!: string;
 	private clientVersion!: string;
+	private visitorData!: string;
 	private seenMessages = new Map<string, number>();
 
 	constructor(private state: DurableObjectState, private env: Env) {
@@ -79,9 +80,9 @@ export class YoutubeChatV3 implements DurableObject {
 			this.initialized = true;
 			const data = await req.json<VideoData>();
 			
-			// Store our surgical extractions
 			this.apiKey = data.apiKey;
 			this.clientVersion = data.clientVersion;
+			this.visitorData = data.visitorData;
 			this.initialData = data.initialData;
 			
 			this.channelId = traverseJSON(this.initialData, (value, key) => {
@@ -119,22 +120,19 @@ export class YoutubeChatV3 implements DurableObject {
 	private async fetchChat(continuationToken: string) {
 		let nextToken = continuationToken;
 		try {
-			// --- THE BUILDER ---
-			// We manually construct the context using the fresh variables.
-			// This is "Pristine JSON" - no corruption possible.
+			// Construct context with VISITOR DATA
 			const payload = {
 				context: {
 					client: {
 						clientName: "WEB",
-						clientVersion: this.clientVersion, // Extracted from page
+						clientVersion: this.clientVersion,
 						hl: "en",
 						gl: "US",
+						visitorData: this.visitorData, // <--- CRITICAL
 						userAgent: COMMON_HEADERS['User-Agent'],
 						osName: "Windows",
 						osVersion: "10.0",
 						platform: "DESKTOP",
-						// Critical:
-						acceptHeader: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
 					}
 				},
 				continuation: continuationToken,
@@ -148,7 +146,11 @@ export class YoutubeChatV3 implements DurableObject {
 
 			if (!res.ok) {
 				const txt = await res.text();
-				this.broadcast({ debug: true, message: `[API ERROR] ${res.status}: ${txt.slice(0, 150)}` });
+				// DEBUG: Print the payload so we can verify it
+				this.broadcast({ 
+					debug: true, 
+					message: `[API ERROR] ${res.status}. Sent visitorData: ${this.visitorData ? "YES" : "NO"}` 
+				});
 				throw new Error(`YouTube API Error: ${res.status}`);
 			}
 
@@ -223,7 +225,7 @@ export class YoutubeChatV3 implements DurableObject {
 		const adapter = this.makeAdapter(adapterType);
 		adapter.sockets.add(ws);
 		
-		ws.send(JSON.stringify({ debug: true, message: "DEBUG: Connected to V3 Surgical Scraper" }));
+		ws.send(JSON.stringify({ debug: true, message: "DEBUG: Connected to V3 Visitor Scraper" }));
 		if (this.nextContinuationToken) this.fetchChat(this.nextContinuationToken);
 
 		ws.addEventListener('close', () => {
