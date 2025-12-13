@@ -28,11 +28,14 @@ export async function createChatObject(
 ): Promise<Response> {
 	const id = env.CHAT_DB.idFromName(videoId);
 	const object = env.CHAT_DB.get(id);
+	
+	// We pass the data to the Durable Object
 	const init = await object.fetch('http://youtube.chat/init', {
 		method: 'POST',
 		body: JSON.stringify(videoData),
 	});
 	if (!init.ok) return init;
+
 	const url = new URL(req.url);
 	return object.fetch('http://youtube.chat/ws' + url.search, req);
 }
@@ -45,6 +48,7 @@ export class YoutubeChatV3 implements DurableObject {
 	private initialData!: VideoData['initialData'];
 	private apiKey!: string;
 	private clientVersion!: string;
+	private visitorData!: string;
 	private seenMessages = new Map<string, number>();
 
 	constructor(private state: DurableObjectState, private env: Env) {
@@ -80,13 +84,14 @@ export class YoutubeChatV3 implements DurableObject {
 			
 			this.apiKey = data.apiKey;
 			this.clientVersion = data.clientVersion;
+			this.visitorData = data.visitorData;
 			this.initialData = data.initialData;
 			
 			this.channelId = traverseJSON(this.initialData, (value, key) => {
 				if (key === 'channelNavigationEndpoint') return value.browseEndpoint?.browseId;
 			}) || 'UNKNOWN';
 
-			const continuation = traverseJSON(data.initialData, (value) => {
+			const continuation = traverseJSON(this.initialData, (value) => {
 				if (value.title === 'Live chat') return value.continuation as Continuation;
 			});
 
@@ -117,9 +122,7 @@ export class YoutubeChatV3 implements DurableObject {
 	private async fetchChat(continuationToken: string) {
 		let nextToken = continuationToken;
 		try {
-			// --- SKELETON PAYLOAD ---
-			// No Visitor Data. No Player State. No Extra Headers.
-			// Just "I am a Web Browser, here is my Token."
+			// Construct context using the POPOUT page data
 			const payload = {
 				context: {
 					client: {
@@ -127,9 +130,15 @@ export class YoutubeChatV3 implements DurableObject {
 						clientVersion: this.clientVersion,
 						hl: "en",
 						gl: "US",
+						visitorData: this.visitorData,
+						userAgent: COMMON_HEADERS['User-Agent'],
+						osName: "Windows",
+						osVersion: "10.0",
+						platform: "DESKTOP",
 					}
 				},
-				continuation: continuationToken
+				continuation: continuationToken,
+				currentPlayerState: { playerOffsetMs: "0" }
 			};
 
 			const res = await fetch(
@@ -139,10 +148,9 @@ export class YoutubeChatV3 implements DurableObject {
 
 			if (!res.ok) {
 				const txt = await res.text();
-				// If this fails, the issue is likely IP BLOCKING by Cloudflare/YouTube interaction.
 				this.broadcast({ 
 					debug: true, 
-					message: `[API ERROR] ${res.status}. Skeleton payload rejected.` 
+					message: `[API ERROR] ${res.status} (Popout Strategy). Msg: ${txt.slice(0, 50)}` 
 				});
 				throw new Error(`YouTube API Error: ${res.status}`);
 			}
@@ -161,9 +169,11 @@ export class YoutubeChatV3 implements DurableObject {
 					if (reloadActions) actions.push(...reloadActions);
 				}
 			}
-
+			
+			// If we got actions, tell the user!
 			if (actions.length > 0) {
-				this.broadcast({ debug: true, message: `[SUCCESS] Found ${actions.length} messages!` });
+				// Only verify debug on first success
+				// this.broadcast({ debug: true, message: `[SUCCESS] ${actions.length} msgs from Popout` });
 			}
 
 			let nextContinuation = data.continuationContents?.liveChatContinuation?.continuations?.[0];
@@ -173,22 +183,11 @@ export class YoutubeChatV3 implements DurableObject {
 			nextToken = (nextContinuation ? getContinuationToken(nextContinuation) : undefined) ?? continuationToken;
 
 			for (const action of actions) {
-				// Safely extract ID
-				try {
-					const cleanData = { ...action };
-					delete cleanData.clickTrackingParams;
-					const actionType = Object.keys(cleanData)[0];
-					const item = cleanData[actionType]?.item;
-					if (item) {
-						const rendererType = Object.keys(item)[0];
-						const id = item[rendererType]?.id;
-						if (id) {
-							if (this.seenMessages.has(id)) continue;
-							this.seenMessages.set(id, Date.now());
-						}
-					}
-				} catch(e) {}
-				
+				const id = this.getId(action);
+				if (id) {
+					if (this.seenMessages.has(id)) continue;
+					this.seenMessages.set(id, Date.now());
+				}
 				this.broadcast(action);
 			}
 		} catch (e: any) {
@@ -197,6 +196,19 @@ export class YoutubeChatV3 implements DurableObject {
 			this.nextContinuationToken = nextToken;
 			if (this.adapters.size > 0) setTimeout(() => this.fetchChat(nextToken), chatInterval);
 		}
+	}
+
+	private getId(data: LiveChatAction) {
+		try {
+			const cleanData = { ...data };
+			delete cleanData.clickTrackingParams;
+			const actionType = Object.keys(cleanData)[0] as keyof LiveChatAction;
+			const action = cleanData[actionType]?.item;
+			if (!action) return undefined;
+			const rendererType = Object.keys(action)[0] as keyof ChatItemRenderer;
+			const renderer = action[rendererType] as { id?: string };
+			return renderer?.id;
+		} catch (e) { return undefined; }
 	}
 
 	private adapters = new Map<string, MessageAdapter>();
@@ -219,7 +231,7 @@ export class YoutubeChatV3 implements DurableObject {
 		const adapter = this.makeAdapter(adapterType);
 		adapter.sockets.add(ws);
 		
-		ws.send(JSON.stringify({ debug: true, message: "DEBUG: Connected to V3 Skeleton Scraper" }));
+		ws.send(JSON.stringify({ debug: true, message: "DEBUG: Connected (Targeting Popout)" }));
 		if (this.nextContinuationToken) this.fetchChat(this.nextContinuationToken);
 
 		ws.addEventListener('close', () => {
