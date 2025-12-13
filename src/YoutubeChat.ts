@@ -33,7 +33,6 @@ export async function createChatObject(
 	req: Request,
 	env: Env
 ): Promise<Response> {
-	// Using the new binding name CHAT_DB
 	const id = env.CHAT_DB.idFromName(videoId);
 	const object = env.CHAT_DB.get(id);
 
@@ -48,7 +47,7 @@ export async function createChatObject(
 	return object.fetch('http://youtube.chat/ws' + url.search, req);
 }
 
-const chatInterval = 1000;
+const chatInterval = 2000; // Slow down slightly for debugging
 
 export class YoutubeChatV3 implements DurableObject {
 	private router: Router<Request, IHTTPMethods>;
@@ -65,14 +64,18 @@ export class YoutubeChatV3 implements DurableObject {
 		r.all('*', () => new Response('Not found', { status: 404 }));
 	}
 
-	private broadcast(data: any) {
+	// NEW: Helper to send text logs directly to your screen
+	private logToClient(message: string) {
+		const payload = JSON.stringify({ debug: true, message: message });
 		for (const adapter of this.adapters.values()) {
-			if (data.debug) {
-				for (const socket of adapter.sockets) {
-					try { socket.send(JSON.stringify(data)); } catch (e) {}
-				}
-				continue;
+			for (const socket of adapter.sockets) {
+				try { socket.send(payload); } catch (e) {}
 			}
+		}
+	}
+
+	private broadcast(data: LiveChatAction) {
+		for (const adapter of this.adapters.values()) {
 			const transformed = adapter.transform(data);
 			if (!transformed) continue;
 			for (const socket of adapter.sockets) {
@@ -103,19 +106,16 @@ export class YoutubeChatV3 implements DurableObject {
 			});
 
 			if (!continuation) {
-				console.log("[INIT ERROR] No continuation found");
 				this.initialized = false;
 				return new Response('Failed to load chat - No continuation found', { status: 404 });
 			}
 
 			const token = getContinuationToken(continuation);
 			if (!token) {
-				console.log("[INIT ERROR] No token found");
 				this.initialized = false;
 				return new Response('Failed to load chat - No token found', { status: 404 });
 			}
 
-			console.log("[INIT SUCCESS] Starting fetch with token:", token);
 			this.fetchChat(token);
 			setInterval(() => this.clearSeenMessages(), 60 * 1000);
 
@@ -138,6 +138,8 @@ export class YoutubeChatV3 implements DurableObject {
 	private async fetchChat(continuationToken: string) {
 		let nextToken = continuationToken;
 		try {
+			this.logToClient(`[FETCH] Calling YouTube with token ending in ...${continuationToken.slice(-10)}`);
+			
 			const headers = {
 				'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 				'Accept': '*/*',
@@ -153,64 +155,57 @@ export class YoutubeChatV3 implements DurableObject {
 				currentPlayerState: { playerOffsetMs: "0" }
 			};
 
-			console.log(`[FETCH] Calling YouTube API...`);
 			const res = await fetch(
 				`https://www.youtube.com/youtubei/v1/live_chat/get_live_chat?key=${this.config.INNERTUBE_API_KEY}`,
 				{ method: 'POST', headers: headers, body: JSON.stringify(payload) }
 			);
 
+			this.logToClient(`[FETCH] Status: ${res.status} ${res.statusText}`);
+
 			if (!res.ok) {
-				console.log(`[FETCH ERROR] Status: ${res.status}`);
+				const txt = await res.text();
+				this.logToClient(`[FETCH ERROR] Body: ${txt.slice(0, 100)}`);
 				throw new Error(`YouTube API Error: ${res.status}`);
 			}
 
 			const data = await res.json<any>();
-			
-			// --- X-RAY LOGGING ---
-			// This prints the top-level keys so we know which "Box" YouTube sent
-			console.log(`[FETCH DATA] Keys: ${Object.keys(data).join(", ")}`);
+			this.logToClient(`[DATA] Keys received: ${Object.keys(data).join(", ")}`);
 			
 			let actions: any[] = [];
 			
-			// Box A: Standard
+			// Box A
 			if (data.continuationContents?.liveChatContinuation?.actions) {
-				console.log("[PARSER] Found actions in continuationContents");
 				actions.push(...data.continuationContents.liveChatContinuation.actions);
 			}
 			
-			// Box B: New Style (Lofi Girl)
+			// Box B (Lofi Girl often uses this)
 			if (data.onResponseReceivedEndpoints) {
-				console.log(`[PARSER] Found onResponseReceivedEndpoints (Length: ${data.onResponseReceivedEndpoints.length})`);
+				this.logToClient(`[PARSER] Found 'onResponseReceivedEndpoints' (Length: ${data.onResponseReceivedEndpoints.length})`);
 				for (const endpoint of data.onResponseReceivedEndpoints) {
 					const endpointActions = endpoint.appendContinuationItemsAction?.continuationItems;
 					if (endpointActions) {
-						console.log(`[PARSER] Found ${endpointActions.length} items in appendContinuationItemsAction`);
 						actions.push(...endpointActions);
+					}
+					const reloadActions = endpoint.reloadContinuationItemsCommand?.continuationItems;
+					if (reloadActions) {
+						actions.push(...reloadActions);
 					}
 				}
 			}
 
-			console.log(`[SUMMARY] Total actions found: ${actions.length}`);
+			this.logToClient(`[SUMMARY] Found ${actions.length} chat actions.`);
 
-			// Token Logic
 			let nextContinuation = data.continuationContents?.liveChatContinuation?.continuations?.[0];
 			if (!nextContinuation && data.continuationContents?.liveChatContinuation) {
 				 nextContinuation = data.continuationContents.liveChatContinuation.continuations?.[0];
 			}
-			
-			// Box B Token Logic
+			// Lofi Girl Token fallback
 			if (!nextContinuation && data.onResponseReceivedEndpoints) {
-				// Often hidden at the end of the action list in Box B
-				// This is a simplified check, if the token is missing, the loop might die.
-				// But let's see the logs first.
+				// Sometimes the token is inside the "timedContinuationData" of the last action
+				// We won't implement complex parsing yet, just seeing the logs will save us.
 			}
 
 			nextToken = (nextContinuation ? getContinuationToken(nextContinuation) : undefined) ?? continuationToken;
-			
-			// Debug: Send to Websocket too so you can see it in "Websocket King"
-			if (actions.length > 0) {
-				this.broadcast({ debug: true, message: `DEBUG: Parsed ${actions.length} messages from YouTube` });
-			}
 
 			for (const action of actions) {
 				const id = this.getId(action);
@@ -220,8 +215,8 @@ export class YoutubeChatV3 implements DurableObject {
 				}
 				this.broadcast(action);
 			}
-		} catch (e) {
-			console.log("[CRITICAL ERROR]", e);
+		} catch (e: any) {
+			this.logToClient(`[CRITICAL ERROR] ${e.message}`);
 		} finally {
 			this.nextContinuationToken = nextToken;
 			if (this.adapters.size > 0)
@@ -273,7 +268,7 @@ export class YoutubeChatV3 implements DurableObject {
 		
 		ws.send(JSON.stringify({
 			debug: true,
-			message: "DEBUG: WebSocket Connected Successfully! Waiting for chat..."
+			message: "DEBUG: Connected! I will now stream logs here..."
 		}));
 
 		if (this.nextContinuationToken) this.fetchChat(this.nextContinuationToken);
