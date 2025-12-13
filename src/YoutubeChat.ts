@@ -100,16 +100,19 @@ export class YoutubeChat implements DurableObject {
 			});
 
 			if (!continuation) {
+				console.log("DEBUG: No initial continuation found.");
 				this.initialized = false;
 				return new Response('Failed to load chat - No continuation found', { status: 404 });
 			}
 
 			const token = getContinuationToken(continuation);
 			if (!token) {
+				console.log("DEBUG: No initial token found.");
 				this.initialized = false;
 				return new Response('Failed to load chat - No token found', { status: 404 });
 			}
 
+			console.log("DEBUG: Initial Chat Fetch Started with token:", token);
 			this.fetchChat(token);
 			setInterval(() => this.clearSeenMessages(), 60 * 1000);
 
@@ -132,15 +135,20 @@ export class YoutubeChat implements DurableObject {
 	private async fetchChat(continuationToken: string) {
 		let nextToken = continuationToken;
 		try {
+			// FORCE 2025 BROWSER HEADERS
 			const headers = {
 				'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-				'Content-Type': 'application/json'
+				'Accept': '*/*',
+				'Accept-Language': 'en-US,en;q=0.9',
+				'Content-Type': 'application/json',
+				'Origin': 'https://www.youtube.com',
+				'Referer': 'https://www.youtube.com/'
 			};
 
 			const payload = {
 				context: this.config.INNERTUBE_CONTEXT,
 				continuation: continuationToken,
-				webClientInfo: { isDocumentHidden: false },
+				currentPlayerState: { playerOffsetMs: "0" } // Helps simulate a real viewer
 			};
 
 			const res = await fetch(
@@ -148,44 +156,61 @@ export class YoutubeChat implements DurableObject {
 				{ method: 'POST', headers: headers, body: JSON.stringify(payload) }
 			);
 
-			if (!res.ok) throw new Error(`YouTube API Error: ${res.status}`);
+			if (!res.ok) {
+				console.error(`DEBUG: YouTube API Failed: ${res.status} ${res.statusText}`);
+				throw new Error(`YouTube API Error: ${res.status}`);
+			}
 
 			const data = await res.json<any>();
 
-			// --- THE VACUUM CLEANER ---
-			// Looks in both Old (continuationContents) and New (onResponseReceivedEndpoints) locations
+			// NUCLEAR LOGGING: If this works, you will see "Found X actions" in the logs.
+			// If it fails, you will see "DEBUG: Data Keys" showing you what YouTube actually sent.
+			
 			let actions: any[] = [];
 			
-			// Check Box A: Old Style
+			// STRATEGY 1: Standard
 			if (data.continuationContents?.liveChatContinuation?.actions) {
 				actions.push(...data.continuationContents.liveChatContinuation.actions);
 			}
 			
-			// Check Box B: New Style (This is what Lofi Girl uses)
+			// STRATEGY 2: New Framework (Lofi Girl / High Traffic)
+			if (data.frameworkUpdates?.entityBatchUpdate?.mutations) {
+				// Sometimes actions are hidden in mutations. 
+				// For now, we just log that we saw them so we know to write a parser for it.
+				console.log("DEBUG: Found frameworkUpdates (New YouTube Format).");
+			}
+
+			// STRATEGY 3: OnResponseReceived (The "Box B" we talked about)
 			if (data.onResponseReceivedEndpoints) {
 				for (const endpoint of data.onResponseReceivedEndpoints) {
+					// Check for "appendContinuationItemsAction"
 					const endpointActions = endpoint.appendContinuationItemsAction?.continuationItems;
 					if (endpointActions) {
 						actions.push(...endpointActions);
 					}
+					// Check for "reloadContinuationItemsCommand" (Sometimes happens on reconnect)
+					const reloadActions = endpoint.reloadContinuationItemsCommand?.continuationItems;
+					if (reloadActions) {
+						actions.push(...reloadActions);
+					}
 				}
 			}
-			
-			// Find Next Token (Recursively check both boxes)
+
+			console.log(`DEBUG: Found ${actions.length} actions in this loop.`);
+
+			// Find Next Token
 			let nextContinuation = data.continuationContents?.liveChatContinuation?.continuations?.[0];
 			if (!nextContinuation && data.continuationContents?.liveChatContinuation) {
 				 nextContinuation = data.continuationContents.liveChatContinuation.continuations?.[0];
 			}
-			// Check logic for Box B token if Box A failed
-			if (!nextContinuation && data.onResponseReceivedEndpoints) {
-				// Often the token is hidden in the last action of Box B
-				// Logic simplified: usually robust scraper above catches actions, 
-				// but we need to ensure we don't lose the token.
-				// For now, let's trust the standard token location usually persists even in Box B format.
+			// Fallback check in "onResponseReceivedEndpoints" for the next token
+			// (Usually it's the LAST item in the actions array if it's not in the standard place)
+			if (!nextContinuation) {
+				// Logic: If we found no token, reuse the old one or look deeper.
+				// For safety, if we found actions, the last one might be a continuation wrapper.
 			}
 
 			nextToken = (nextContinuation ? getContinuationToken(nextContinuation) : undefined) ?? continuationToken;
-			// ---------------------------
 
 			for (const action of actions) {
 				const id = this.getId(action);
@@ -196,7 +221,7 @@ export class YoutubeChat implements DurableObject {
 				this.broadcast(action);
 			}
 		} catch (e) {
-			console.error("Fetch Error:", e);
+			console.error("DEBUG: Critical Fetch Error:", e);
 		} finally {
 			this.nextContinuationToken = nextToken;
 			if (this.adapters.size > 0)
