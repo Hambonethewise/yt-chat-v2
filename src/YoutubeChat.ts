@@ -43,7 +43,9 @@ export class YoutubeChatV3 implements DurableObject {
 	private router: Router<Request, IHTTPMethods>;
 	private channelId!: string;
 	private initialData!: VideoData['initialData'];
-	private config!: VideoData['config'];
+	// Note: We store the raw keys now, not the full config object
+	private apiKey!: string;
+	private clientVersion!: string;
 	private seenMessages = new Map<string, number>();
 
 	constructor(private state: DurableObjectState, private env: Env) {
@@ -56,7 +58,6 @@ export class YoutubeChatV3 implements DurableObject {
 
 	private broadcast(data: any) {
 		for (const adapter of this.adapters.values()) {
-			// Support debug messages
 			if (data.debug) {
 				for (const socket of adapter.sockets) {
 					try { socket.send(JSON.stringify(data)); } catch (e) {}
@@ -77,7 +78,10 @@ export class YoutubeChatV3 implements DurableObject {
 			if (this.initialized) return new Response();
 			this.initialized = true;
 			const data = await req.json<VideoData>();
-			this.config = data.config;
+			
+			// Store our surgical extractions
+			this.apiKey = data.apiKey;
+			this.clientVersion = data.clientVersion;
 			this.initialData = data.initialData;
 			
 			this.channelId = traverseJSON(this.initialData, (value, key) => {
@@ -115,21 +119,36 @@ export class YoutubeChatV3 implements DurableObject {
 	private async fetchChat(continuationToken: string) {
 		let nextToken = continuationToken;
 		try {
+			// --- THE BUILDER ---
+			// We manually construct the context using the fresh variables.
+			// This is "Pristine JSON" - no corruption possible.
 			const payload = {
-				context: this.config.INNERTUBE_CONTEXT,
+				context: {
+					client: {
+						clientName: "WEB",
+						clientVersion: this.clientVersion, // Extracted from page
+						hl: "en",
+						gl: "US",
+						userAgent: COMMON_HEADERS['User-Agent'],
+						osName: "Windows",
+						osVersion: "10.0",
+						platform: "DESKTOP",
+						// Critical:
+						acceptHeader: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+					}
+				},
 				continuation: continuationToken,
-				currentPlayerState: { playerOffsetMs: "0" },
-				webClientInfo: { isDocumentHidden: false }
+				currentPlayerState: { playerOffsetMs: "0" }
 			};
 
 			const res = await fetch(
-				`https://www.youtube.com/youtubei/v1/live_chat/get_live_chat?key=${this.config.INNERTUBE_API_KEY}`,
+				`https://www.youtube.com/youtubei/v1/live_chat/get_live_chat?key=${this.apiKey}`,
 				{ method: 'POST', headers: COMMON_HEADERS, body: JSON.stringify(payload) }
 			);
 
 			if (!res.ok) {
 				const txt = await res.text();
-				this.broadcast({ debug: true, message: `[ERROR] API ${res.status}: ${txt.slice(0, 100)}` });
+				this.broadcast({ debug: true, message: `[API ERROR] ${res.status}: ${txt.slice(0, 150)}` });
 				throw new Error(`YouTube API Error: ${res.status}`);
 			}
 
@@ -204,7 +223,7 @@ export class YoutubeChatV3 implements DurableObject {
 		const adapter = this.makeAdapter(adapterType);
 		adapter.sockets.add(ws);
 		
-		ws.send(JSON.stringify({ debug: true, message: "DEBUG: Connected to V3 Robust Scraper" }));
+		ws.send(JSON.stringify({ debug: true, message: "DEBUG: Connected to V3 Surgical Scraper" }));
 		if (this.nextContinuationToken) this.fetchChat(this.nextContinuationToken);
 
 		ws.addEventListener('close', () => {
