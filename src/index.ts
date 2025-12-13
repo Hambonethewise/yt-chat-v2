@@ -3,7 +3,8 @@ import { getChannel } from './routes/channel';
 import { getStream } from './routes/stream';
 import { HandlerResult } from '@util/types';
 import { notFound } from '@util/util';
-export { YoutubeChatV2 } from './YoutubeChat'; // <--- UPDATED IMPORT
+// CHANGED TO V3 HERE
+export { YoutubeChatV3 } from './YoutubeChat';
 
 export interface Env {
 	YOUTUBE_CHAT: DurableObjectNamespace;
