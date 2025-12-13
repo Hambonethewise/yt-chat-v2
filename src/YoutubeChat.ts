@@ -39,8 +39,8 @@ export async function createChatObject(
 	return object.fetch('http://youtube.chat/ws' + url.search, req);
 }
 
-// Start with standard speed
-const BASE_CHAT_INTERVAL = 1000;
+// SLOW DOWN: 3 seconds is safer for Cloudflare limits
+const BASE_CHAT_INTERVAL = 3000;
 
 export class YoutubeChatV3 implements DurableObject {
 	private router: Router<Request, IHTTPMethods>;
@@ -61,13 +61,15 @@ export class YoutubeChatV3 implements DurableObject {
 
 	private broadcast(data: any) {
 		for (const adapter of this.adapters.values()) {
-			// Debug block
+			// SILENCED DEBUG LOGS (Uncomment if you need to debug again)
+			/*
 			if (data.debug) {
 				for (const socket of adapter.sockets) {
 					try { socket.send(JSON.stringify(data)); } catch (e) {}
 				}
 				continue;
 			}
+			*/
 			
 			const transformed = adapter.transform(data);
 			if (!transformed) continue;
@@ -126,7 +128,6 @@ export class YoutubeChatV3 implements DurableObject {
 		let currentInterval = BASE_CHAT_INTERVAL;
 
 		try {
-			// HYBRID PAYLOAD (This worked for "Yo wsp")
 			const payload = {
 				context: {
 					client: {
@@ -151,55 +152,48 @@ export class YoutubeChatV3 implements DurableObject {
 					method: 'POST', 
 					headers: COMMON_HEADERS, 
 					body: JSON.stringify(payload),
-					// CRITICAL FIX: Stop the worker from chasing redirects into a crash loop
+					// CRITICAL: Manual redirect handling prevents "Too many subrequests" crash
 					redirect: 'manual' 
 				}
 			);
 
 			if (!res.ok) {
-				// If we get a 302/303 (Redirect), it's treated as an error here because of 'manual'
-				// This stops the recursion crash.
-				this.broadcast({ 
-					debug: true, 
-					message: `[API STATUS] ${res.status}. Retrying in 5s...` 
-				});
-				currentInterval = 5000; // Slow down
-				throw new Error(`YouTube API Error: ${res.status}`);
-			}
-
-			const data = await res.json<any>();
-			let actions: any[] = [];
-			
-			if (data.continuationContents?.liveChatContinuation?.actions) {
-				actions.push(...data.continuationContents.liveChatContinuation.actions);
-			}
-			if (data.onResponseReceivedEndpoints) {
-				for (const endpoint of data.onResponseReceivedEndpoints) {
-					const endpointActions = endpoint.appendContinuationItemsAction?.continuationItems;
-					if (endpointActions) actions.push(...endpointActions);
-					const reloadActions = endpoint.reloadContinuationItemsCommand?.continuationItems;
-					if (reloadActions) actions.push(...reloadActions);
+				// If error or redirect, just wait longer and try again. 
+				// Do NOT throw error, do NOT crash. Just wait.
+				currentInterval = 5000; 
+			} else {
+				const data = await res.json<any>();
+				let actions: any[] = [];
+				
+				if (data.continuationContents?.liveChatContinuation?.actions) {
+					actions.push(...data.continuationContents.liveChatContinuation.actions);
 				}
-			}
-
-			let nextContinuation = data.continuationContents?.liveChatContinuation?.continuations?.[0];
-			if (!nextContinuation && data.continuationContents?.liveChatContinuation) {
-				nextContinuation = data.continuationContents.liveChatContinuation.continuations?.[0];
-			}
-			nextToken = (nextContinuation ? getContinuationToken(nextContinuation) : undefined) ?? continuationToken;
-
-			for (const action of actions) {
-				const id = this.getId(action);
-				if (id) {
-					if (this.seenMessages.has(id)) continue;
-					this.seenMessages.set(id, Date.now());
+				if (data.onResponseReceivedEndpoints) {
+					for (const endpoint of data.onResponseReceivedEndpoints) {
+						const endpointActions = endpoint.appendContinuationItemsAction?.continuationItems;
+						if (endpointActions) actions.push(...endpointActions);
+						const reloadActions = endpoint.reloadContinuationItemsCommand?.continuationItems;
+						if (reloadActions) actions.push(...reloadActions);
+					}
 				}
-				this.broadcast(action);
+
+				let nextContinuation = data.continuationContents?.liveChatContinuation?.continuations?.[0];
+				if (!nextContinuation && data.continuationContents?.liveChatContinuation) {
+					nextContinuation = data.continuationContents.liveChatContinuation.continuations?.[0];
+				}
+				nextToken = (nextContinuation ? getContinuationToken(nextContinuation) : undefined) ?? continuationToken;
+
+				for (const action of actions) {
+					const id = this.getId(action);
+					if (id) {
+						if (this.seenMessages.has(id)) continue;
+						this.seenMessages.set(id, Date.now());
+					}
+					this.broadcast(action);
+				}
 			}
 		} catch (e: any) {
-			// Catch error, announce it, but DO NOT CRASH.
-			// Just wait 5 seconds and try again.
-			// this.broadcast({ debug: true, message: `[WARN] ${e.message}` });
+			// Catch network blips without crashing
 			currentInterval = 5000;
 		} finally {
 			this.nextContinuationToken = nextToken;
@@ -241,7 +235,8 @@ export class YoutubeChatV3 implements DurableObject {
 		const adapter = this.makeAdapter(adapterType);
 		adapter.sockets.add(ws);
 		
-		ws.send(JSON.stringify({ debug: true, message: "DEBUG: Connected (Stabilized Hybrid)" }));
+		// Send a single "Ready" message
+		ws.send(JSON.stringify({ debug: true, message: "Connected. Listening for chat..." }));
 		if (this.nextContinuationToken) this.fetchChat(this.nextContinuationToken);
 
 		ws.addEventListener('close', () => {
