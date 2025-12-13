@@ -10,5 +10,5 @@ TRUFFLE_API_BASE = 'https://v2.truffle.vip'
 bindings = [{ name = "YOUTUBE_CHAT", class_name = "YoutubeChat" }]
 
 [[migrations]]
-tag = "fix-sqlite-v2"
+tag = "fix-sqlite-v3"
 new_sqlite_classes = ["YoutubeChat"]
