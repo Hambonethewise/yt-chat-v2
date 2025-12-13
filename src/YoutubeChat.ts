@@ -61,12 +61,14 @@ export class YoutubeChatV3 implements DurableObject {
 
 	private broadcast(data: any) {
 		for (const adapter of this.adapters.values()) {
+			// This is the debug block. You can comment it out later to silence logs.
 			if (data.debug) {
 				for (const socket of adapter.sockets) {
 					try { socket.send(JSON.stringify(data)); } catch (e) {}
 				}
 				continue;
 			}
+			
 			const transformed = adapter.transform(data);
 			if (!transformed) continue;
 			for (const socket of adapter.sockets) {
@@ -170,11 +172,10 @@ export class YoutubeChatV3 implements DurableObject {
 				}
 			}
 			
-			// If we got actions, tell the user!
-			if (actions.length > 0) {
-				// Only verify debug on first success
-				// this.broadcast({ debug: true, message: `[SUCCESS] ${actions.length} msgs from Popout` });
-			}
+			// If we got actions, you could uncomment this to debug:
+			// if (actions.length > 0) {
+			//    this.broadcast({ debug: true, message: `[SUCCESS] ${actions.length} msgs from Popout` });
+			// }
 
 			let nextContinuation = data.continuationContents?.liveChatContinuation?.continuations?.[0];
 			if (!nextContinuation && data.continuationContents?.liveChatContinuation) {
