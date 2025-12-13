@@ -33,8 +33,9 @@ export async function createChatObject(
 	req: Request,
 	env: Env
 ): Promise<Response> {
-	const id = env.YOUTUBE_CHAT.idFromName(videoId);
-	const object = env.YOUTUBE_CHAT.get(id);
+	// CHANGED VARIABLE NAME HERE
+	const id = env.CHAT_DB.idFromName(videoId);
+	const object = env.CHAT_DB.get(id);
 
 	const init = await object.fetch('http://youtube.chat/init', {
 		method: 'POST',
@@ -49,7 +50,6 @@ export async function createChatObject(
 
 const chatInterval = 1000;
 
-// CHANGED TO V3 HERE
 export class YoutubeChatV3 implements DurableObject {
 	private router: Router<Request, IHTTPMethods>;
 	private channelId!: string;
