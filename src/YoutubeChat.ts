@@ -50,6 +50,7 @@ export class YoutubeChatV3 implements DurableObject {
 	private visitorData!: string;
 	private seenMessages = new Map<string, number>();
 	private isLoopRunning = false; 
+	private nextContinuationToken?: string; // Stored at class level now
 
 	constructor(private state: DurableObjectState, private env: Env) {
 		const r = Router<Request, IHTTPMethods>();
@@ -91,7 +92,27 @@ export class YoutubeChatV3 implements DurableObject {
 	private initialized = false;
 	private init: Handler = (req) => {
 		return this.state.blockConcurrencyWhile(async () => {
-			if (this.initialized) return new Response();
+			if (this.initialized) {
+				// RE-INJECTION FIX:
+				// If we are already initialized, but the user sends new data (reconnect),
+				// we grab the fresh token and FORCE UPDATE the class variable.
+				// The running loop will pick this up on its next tick.
+				try {
+					const data = await req.json<VideoData>();
+					const continuation = traverseJSON(data.initialData, (value) => {
+						if (value.title === 'Live chat') return value.continuation as Continuation;
+					});
+					if (continuation) {
+						const token = getContinuationToken(continuation);
+						if (token) {
+							this.nextContinuationToken = token;
+							// this.broadcast({ debug: true, message: "[INFO] Fresh token injected from client." });
+						}
+					}
+				} catch(e) {}
+				return new Response();
+			}
+
 			this.initialized = true;
 			const data = await req.json<VideoData>();
 			
@@ -118,9 +139,12 @@ export class YoutubeChatV3 implements DurableObject {
 				return new Response('No token found', { status: 404 });
 			}
 
-			// START THE LOOP (If not already running)
+			// Store token globally
+			this.nextContinuationToken = token;
+
+			// Start the loop if needed
 			if (!this.isLoopRunning) {
-				this.fetchChat(token);
+				this.fetchChat();
 			}
 			
 			setInterval(() => this.clearSeenMessages(), 60 * 1000);
@@ -128,7 +152,6 @@ export class YoutubeChatV3 implements DurableObject {
 		});
 	};
 
-	private nextContinuationToken?: string;
 	private async clearSeenMessages() {
 		const cutoff = Date.now() - 1000 * 60;
 		for (const [id, timestamp] of this.seenMessages.entries()) {
@@ -136,10 +159,19 @@ export class YoutubeChatV3 implements DurableObject {
 		}
 	}
 
-	private async fetchChat(continuationToken: string) {
-		this.isLoopRunning = true; // Lock the loop
-		let nextToken = continuationToken;
+	// NOTE: No arguments. It always reads from this.nextContinuationToken
+	private async fetchChat() {
+		this.isLoopRunning = true; 
 		let currentInterval = BASE_CHAT_INTERVAL;
+
+		// Grab the current best token from the class
+		const tokenToUse = this.nextContinuationToken;
+
+		if (!tokenToUse) {
+			// If we lost the token, wait and try again (maybe init will provide one)
+			setTimeout(() => this.fetchChat(), 5000);
+			return;
+		}
 
 		try {
 			const controller = new AbortController();
@@ -158,7 +190,7 @@ export class YoutubeChatV3 implements DurableObject {
 						platform: "DESKTOP",
 					}
 				},
-				continuation: continuationToken,
+				continuation: tokenToUse, // Use the class-level token
 				currentPlayerState: { playerOffsetMs: "0" }
 			};
 
@@ -200,6 +232,7 @@ export class YoutubeChatV3 implements DurableObject {
 				}
 			}
 
+			// Update the Class Token with the new one found in response
 			const foundToken = traverseJSON(data, (value, key) => {
 				if (key === "continuation" && typeof value === "string") {
 					return value;
@@ -207,8 +240,9 @@ export class YoutubeChatV3 implements DurableObject {
 			});
 
 			if (foundToken) {
-				nextToken = foundToken;
+				this.nextContinuationToken = foundToken;
 			}
+			// If no token found, we KEEP the old one (or the injected one), we don't null it out.
 
 			for (const action of actions) {
 				const id = this.getId(action);
@@ -225,12 +259,8 @@ export class YoutubeChatV3 implements DurableObject {
 			}
 			currentInterval = 5000;
 		} finally {
-			this.nextContinuationToken = nextToken;
-			
-			// --- THE IMMORTAL FIX ---
-			// We ALWAYS call this, regardless of adapter count.
-			// The loop must never die.
-			setTimeout(() => this.fetchChat(nextToken), currentInterval);
+			// Loop forever using whatever token is currently in the class
+			setTimeout(() => this.fetchChat(), currentInterval);
 		}
 	}
 
