@@ -156,77 +156,72 @@ export class YoutubeChatV3 implements DurableObject {
 				currentPlayerState: { playerOffsetMs: "0" }
 			};
 
-			const fetchPromise = fetch(
-				`https://www.youtube.com/youtubei/v1/live_chat/get_live_chat?key=${this.apiKey}`,
-				{ 
-					method: 'POST', 
-					headers: COMMON_HEADERS, 
-					body: JSON.stringify(payload),
-					redirect: 'manual',
-					signal: controller.signal 
-				}
-			);
+			// --- THE FIX: Wrap Fetch + JSON in one Task ---
+			const fetchDataTask = async () => {
+				const res = await fetch(
+					`https://www.youtube.com/youtubei/v1/live_chat/get_live_chat?key=${this.apiKey}`,
+					{ 
+						method: 'POST', 
+						headers: COMMON_HEADERS, 
+						body: JSON.stringify(payload),
+						redirect: 'manual',
+						signal: controller.signal 
+					}
+				);
+				if (!res.ok) throw new Error(`Status ${res.status}`);
+				// Crucial: We await the JSON *inside* the task so it is covered by the timer
+				return await res.json<any>();
+			};
 
-			const timeoutPromise = new Promise<Response>((_, reject) => 
+			const timeoutPromise = new Promise<never>((_, reject) => 
 				setTimeout(() => {
 					controller.abort();
 					reject(new Error("ForceTimeout"));
 				}, 10000)
 			);
 
-			// Start the race
-			const res = await Promise.race([fetchPromise, timeoutPromise]);
+			// Race the ENTIRE job against the clock
+			const data = await Promise.race([fetchDataTask(), timeoutPromise]);
 
-			// IMPORTANT: Do NOT clear the timeout here! 
-			// We must wait until the JSON is downloaded.
-
-			if (!res.ok) {
-				currentInterval = 5000; 
-			} else {
-				// The timeout is still ticking while we download this...
-				const data = await res.json<any>(); 
-				
-				// NOW it is safe to stop the timer. We have the data.
-				// (We can't actually clear the specific ID easily from here, 
-				// but because we finished, the abort below won't matter, 
-				// or the loop will naturally continue).
-				
-				let actions: any[] = [];
-				
-				if (data.continuationContents?.liveChatContinuation?.actions) {
-					actions.push(...data.continuationContents.liveChatContinuation.actions);
-				}
-				if (data.onResponseReceivedEndpoints) {
-					for (const endpoint of data.onResponseReceivedEndpoints) {
-						const endpointActions = endpoint.appendContinuationItemsAction?.continuationItems;
-						if (endpointActions) actions.push(...endpointActions);
-						const reloadActions = endpoint.reloadContinuationItemsCommand?.continuationItems;
-						if (reloadActions) actions.push(...reloadActions);
-					}
-				}
-
-				const foundToken = traverseJSON(data, (value, key) => {
-					if (key === "continuation" && typeof value === "string") {
-						return value;
-					}
-				});
-
-				if (foundToken) {
-					nextToken = foundToken;
-				}
-
-				for (const action of actions) {
-					const id = this.getId(action);
-					if (id) {
-						if (this.seenMessages.has(id)) continue;
-						this.seenMessages.set(id, Date.now());
-					}
-					this.broadcast(action);
+			// If we get here, we have the full data safely.
+			
+			let actions: any[] = [];
+			
+			if (data.continuationContents?.liveChatContinuation?.actions) {
+				actions.push(...data.continuationContents.liveChatContinuation.actions);
+			}
+			if (data.onResponseReceivedEndpoints) {
+				for (const endpoint of data.onResponseReceivedEndpoints) {
+					const endpointActions = endpoint.appendContinuationItemsAction?.continuationItems;
+					if (endpointActions) actions.push(...endpointActions);
+					const reloadActions = endpoint.reloadContinuationItemsCommand?.continuationItems;
+					if (reloadActions) actions.push(...reloadActions);
 				}
 			}
+
+			const foundToken = traverseJSON(data, (value, key) => {
+				if (key === "continuation" && typeof value === "string") {
+					return value;
+				}
+			});
+
+			if (foundToken) {
+				nextToken = foundToken;
+			}
+
+			for (const action of actions) {
+				const id = this.getId(action);
+				if (id) {
+					if (this.seenMessages.has(id)) continue;
+					this.seenMessages.set(id, Date.now());
+				}
+				this.broadcast(action);
+			}
+
 		} catch (e: any) {
+			// Now this catches Download Freezes too!
 			if (e.message === "ForceTimeout" || e.name === 'AbortError') {
-				this.broadcast({ debug: true, message: "⚠️ [ANTI-FREEZE] Data download hung. Resetting..." });
+				this.broadcast({ debug: true, message: "⚠️ [ANTI-FREEZE] Download hung. Resetting..." });
 			}
 			currentInterval = 5000;
 		} finally {
