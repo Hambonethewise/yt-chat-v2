@@ -73,6 +73,14 @@ export class YoutubeChatV3 implements DurableObject {
 
 	private broadcast(data: any) {
 		for (const adapter of this.adapters.values()) {
+			// Sending DEBUG messages to help you verify it is working
+			if (data.debug) {
+				for (const socket of adapter.sockets) {
+					try { socket.send(JSON.stringify(data)); } catch (e) {}
+				}
+				continue;
+			}
+			
 			const transformed = adapter.transform(data);
 			if (!transformed) continue;
 			for (const socket of adapter.sockets) {
@@ -130,11 +138,8 @@ export class YoutubeChatV3 implements DurableObject {
 		let currentInterval = BASE_CHAT_INTERVAL;
 
 		try {
-			// --- THE FIX: TIMEOUT CONTROLLER ---
-			// We give YouTube 10 seconds to reply. If they don't, we abort.
 			const controller = new AbortController();
-			const timeoutId = setTimeout(() => controller.abort(), 10000);
-
+			
 			const payload = {
 				context: {
 					client: {
@@ -153,20 +158,31 @@ export class YoutubeChatV3 implements DurableObject {
 				currentPlayerState: { playerOffsetMs: "0" }
 			};
 
-			const res = await fetch(
+			const fetchPromise = fetch(
 				`https://www.youtube.com/youtubei/v1/live_chat/get_live_chat?key=${this.apiKey}`,
 				{ 
 					method: 'POST', 
 					headers: COMMON_HEADERS, 
 					body: JSON.stringify(payload),
 					redirect: 'manual',
-					signal: controller.signal // <--- Connects the timer to the request
+					signal: controller.signal 
 				}
 			);
-			
-			clearTimeout(timeoutId); // Request worked! Stop the timer.
+
+			// --- THE HARD RESET ---
+			// Race the fetch against a 10s timer. Whoever finishes first wins.
+			// If timer wins, we throw an error to break the freeze.
+			const timeoutPromise = new Promise<Response>((_, reject) => 
+				setTimeout(() => {
+					controller.abort();
+					reject(new Error("Timeout"));
+				}, 10000)
+			);
+
+			const res = await Promise.race([fetchPromise, timeoutPromise]);
 
 			if (!res.ok) {
+				this.broadcast({ debug: true, message: `[STATUS] API ${res.status}. Retrying...` });
 				currentInterval = 5000; 
 			} else {
 				const data = await res.json<any>();
@@ -204,7 +220,8 @@ export class YoutubeChatV3 implements DurableObject {
 				}
 			}
 		} catch (e: any) {
-			// If it times out, we catch it here and try again in 5s.
+			// Debug log to confirm we are resetting the loop
+			// this.broadcast({ debug: true, message: "[INFO] Connection Reset. Reconnecting..." });
 			currentInterval = 5000;
 		} finally {
 			this.nextContinuationToken = nextToken;
