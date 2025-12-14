@@ -1,8 +1,6 @@
 name = "yt-chat-fresh"
 main = "src/index.ts"
-compatibility_date = "2024-01-01"  # <--- CRITICAL: Must be newer than Oct 2022
-
-# ... your other vars ...
+compatibility_date = "2024-01-01"
 
 [durable_objects]
 bindings = [
@@ -10,5 +8,5 @@ bindings = [
 ]
 
 [[migrations]]
-tag = "v1" # Or your next version number
-new_classes = ["YoutubeChatV3"]
+tag = "v2-sqlite"
+new_sqlite_classes = ["YoutubeChatV3"]
