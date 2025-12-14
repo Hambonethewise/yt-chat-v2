@@ -49,7 +49,7 @@ export class YoutubeChatV3 implements DurableObject {
 	private clientVersion!: string;
 	private visitorData!: string;
 	private seenMessages = new Map<string, number>();
-	private loopCount = 0; // Track loops for pinging
+	private loopCount = 0; 
 
 	constructor(private state: DurableObjectState, private env: Env) {
 		const r = Router<Request, IHTTPMethods>();
@@ -57,26 +57,9 @@ export class YoutubeChatV3 implements DurableObject {
 		r.post('/init', this.init);
 		r.get('/ws', this.handleWebsocket);
 		r.all('*', () => new Response('Not found', { status: 404 }));
-	}
 
-	private broadcast(data: any) {
-		for (const adapter of this.adapters.values()) {
-			// Debug logs are silenced
-			/*
-			if (data.debug) {
-				for (const socket of adapter.sockets) {
-					try { socket.send(JSON.stringify(data)); } catch (e) {}
-				}
-				continue;
-			}
-			*/
-			
-			const transformed = adapter.transform(data);
-			if (!transformed) continue;
-			for (const socket of adapter.sockets) {
-				try { socket.send(transformed); } catch (e) {}
-			}
-		}
+		// Keep the websocket alive
+		setInterval(() => this.sendPing(), 30000); 
 	}
 
 	private sendPing() {
@@ -84,6 +67,16 @@ export class YoutubeChatV3 implements DurableObject {
 		for (const adapter of this.adapters.values()) {
 			for (const socket of adapter.sockets) {
 				try { socket.send(pingData); } catch (e) {}
+			}
+		}
+	}
+
+	private broadcast(data: any) {
+		for (const adapter of this.adapters.values()) {
+			const transformed = adapter.transform(data);
+			if (!transformed) continue;
+			for (const socket of adapter.sockets) {
+				try { socket.send(transformed); } catch (e) {}
 			}
 		}
 	}
@@ -136,16 +129,9 @@ export class YoutubeChatV3 implements DurableObject {
 		let nextToken = continuationToken;
 		let currentInterval = BASE_CHAT_INTERVAL;
 
-		// --- HEARTBEAT ---
-		// Every 10 loops (approx 30s), send a ping to keep connection alive
-		this.loopCount++;
-		if (this.loopCount % 10 === 0) {
-			this.sendPing();
-		}
-
 		try {
-			// --- TIMEOUT CONTROLLER ---
-			// If YouTube doesn't answer in 10s, we abort.
+			// --- THE FIX: TIMEOUT CONTROLLER ---
+			// We give YouTube 10 seconds to reply. If they don't, we abort.
 			const controller = new AbortController();
 			const timeoutId = setTimeout(() => controller.abort(), 10000);
 
@@ -174,11 +160,11 @@ export class YoutubeChatV3 implements DurableObject {
 					headers: COMMON_HEADERS, 
 					body: JSON.stringify(payload),
 					redirect: 'manual',
-					signal: controller.signal // Link the timeout
+					signal: controller.signal // <--- Connects the timer to the request
 				}
 			);
 			
-			clearTimeout(timeoutId); // Clear timeout if successful
+			clearTimeout(timeoutId); // Request worked! Stop the timer.
 
 			if (!res.ok) {
 				currentInterval = 5000; 
@@ -218,7 +204,7 @@ export class YoutubeChatV3 implements DurableObject {
 				}
 			}
 		} catch (e: any) {
-			// If timeout or error, just wait and retry.
+			// If it times out, we catch it here and try again in 5s.
 			currentInterval = 5000;
 		} finally {
 			this.nextContinuationToken = nextToken;
