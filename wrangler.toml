@@ -1,12 +1,12 @@
-name = "yt-chat-fresh"
+name = "yt-chat-v2" # <--- NEW NAME = NEW WORKER
 main = "src/index.ts"
 compatibility_date = "2024-01-01"
 
 [durable_objects]
 bindings = [
-  { name = "CHAT_DB", class_name = "YoutubeChatV4" } # Changed to V4
+  { name = "CHAT_DB", class_name = "YoutubeChatV4" }
 ]
 
 [[migrations]]
-tag = "v3-sqlite-fix" # New unique tag
-new_sqlite_classes = ["YoutubeChatV4"] # Changed to V4
+tag = "v1-init" # Resetting to v1 for the new worker
+new_sqlite_classes = ["YoutubeChatV4"]
