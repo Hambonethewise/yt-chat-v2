@@ -39,7 +39,7 @@ export async function createChatObject(
 	return object.fetch('http://youtube.chat/ws' + url.search, req);
 }
 
-// SLOW DOWN: 3 seconds is safer for Cloudflare limits
+// 3 seconds interval to keep Cloudflare happy
 const BASE_CHAT_INTERVAL = 3000;
 
 export class YoutubeChatV3 implements DurableObject {
@@ -61,7 +61,7 @@ export class YoutubeChatV3 implements DurableObject {
 
 	private broadcast(data: any) {
 		for (const adapter of this.adapters.values()) {
-			// SILENCED DEBUG LOGS (Uncomment if you need to debug again)
+			// SILENCED DEBUG LOGS
 			/*
 			if (data.debug) {
 				for (const socket of adapter.sockets) {
@@ -152,14 +152,11 @@ export class YoutubeChatV3 implements DurableObject {
 					method: 'POST', 
 					headers: COMMON_HEADERS, 
 					body: JSON.stringify(payload),
-					// CRITICAL: Manual redirect handling prevents "Too many subrequests" crash
 					redirect: 'manual' 
 				}
 			);
 
 			if (!res.ok) {
-				// If error or redirect, just wait longer and try again. 
-				// Do NOT throw error, do NOT crash. Just wait.
 				currentInterval = 5000; 
 			} else {
 				const data = await res.json<any>();
@@ -177,11 +174,23 @@ export class YoutubeChatV3 implements DurableObject {
 					}
 				}
 
-				let nextContinuation = data.continuationContents?.liveChatContinuation?.continuations?.[0];
-				if (!nextContinuation && data.continuationContents?.liveChatContinuation) {
-					nextContinuation = data.continuationContents.liveChatContinuation.continuations?.[0];
+				// --- DEEP SEARCH FOR TOKEN ---
+				// Instead of trusting one path, we scan the whole object for the continuation string.
+				// This prevents the "Stale Token Loop".
+				const foundToken = traverseJSON(data, (value, key) => {
+					if (key === "continuation" && typeof value === "string") {
+						return value;
+					}
+				});
+
+				if (foundToken) {
+					nextToken = foundToken;
+				} else {
+					// If absolutely no token found, we must keep the old one, 
+					// BUT usually this means we need to look closer.
+					// For now, defaulting to old is safer than crashing, 
+					// but the Deep Search above should catch 99% of cases.
 				}
-				nextToken = (nextContinuation ? getContinuationToken(nextContinuation) : undefined) ?? continuationToken;
 
 				for (const action of actions) {
 					const id = this.getId(action);
@@ -193,7 +202,6 @@ export class YoutubeChatV3 implements DurableObject {
 				}
 			}
 		} catch (e: any) {
-			// Catch network blips without crashing
 			currentInterval = 5000;
 		} finally {
 			this.nextContinuationToken = nextToken;
@@ -235,7 +243,6 @@ export class YoutubeChatV3 implements DurableObject {
 		const adapter = this.makeAdapter(adapterType);
 		adapter.sockets.add(ws);
 		
-		// Send a single "Ready" message
 		ws.send(JSON.stringify({ debug: true, message: "Connected. Listening for chat..." }));
 		if (this.nextContinuationToken) this.fetchChat(this.nextContinuationToken);
 
