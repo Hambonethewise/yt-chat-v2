@@ -50,7 +50,7 @@ export class YoutubeChatV3 implements DurableObject {
 	private visitorData!: string;
 	private seenMessages = new Map<string, number>();
 	private isLoopRunning = false; 
-	private nextContinuationToken?: string; // Stored at class level now
+	private nextContinuationToken?: string; 
 
 	constructor(private state: DurableObjectState, private env: Env) {
 		const r = Router<Request, IHTTPMethods>();
@@ -67,8 +67,18 @@ export class YoutubeChatV3 implements DurableObject {
 		const pingData = JSON.stringify({ type: 'ping' });
 		for (const adapter of this.adapters.values()) {
 			for (const socket of adapter.sockets) {
-				try { socket.send(pingData); } catch (e) {}
+				this.safeSend(socket, pingData);
 			}
+		}
+	}
+
+	// Helper to send data safely and detect dead sockets
+	private safeSend(socket: WebSocket, data: string) {
+		try {
+			socket.send(data);
+		} catch (e) {
+			// If sending fails, the socket is dead. Close it.
+			try { socket.close(); } catch(e) {}
 		}
 	}
 
@@ -76,7 +86,7 @@ export class YoutubeChatV3 implements DurableObject {
 		for (const adapter of this.adapters.values()) {
 			if (data.debug) {
 				for (const socket of adapter.sockets) {
-					try { socket.send(JSON.stringify(data)); } catch (e) {}
+					this.safeSend(socket, JSON.stringify(data));
 				}
 				continue;
 			}
@@ -84,7 +94,7 @@ export class YoutubeChatV3 implements DurableObject {
 			const transformed = adapter.transform(data);
 			if (!transformed) continue;
 			for (const socket of adapter.sockets) {
-				try { socket.send(transformed); } catch (e) {}
+				this.safeSend(socket, transformed);
 			}
 		}
 	}
@@ -93,10 +103,6 @@ export class YoutubeChatV3 implements DurableObject {
 	private init: Handler = (req) => {
 		return this.state.blockConcurrencyWhile(async () => {
 			if (this.initialized) {
-				// RE-INJECTION FIX:
-				// If we are already initialized, but the user sends new data (reconnect),
-				// we grab the fresh token and FORCE UPDATE the class variable.
-				// The running loop will pick this up on its next tick.
 				try {
 					const data = await req.json<VideoData>();
 					const continuation = traverseJSON(data.initialData, (value) => {
@@ -106,7 +112,6 @@ export class YoutubeChatV3 implements DurableObject {
 						const token = getContinuationToken(continuation);
 						if (token) {
 							this.nextContinuationToken = token;
-							// this.broadcast({ debug: true, message: "[INFO] Fresh token injected from client." });
 						}
 					}
 				} catch(e) {}
@@ -139,10 +144,8 @@ export class YoutubeChatV3 implements DurableObject {
 				return new Response('No token found', { status: 404 });
 			}
 
-			// Store token globally
 			this.nextContinuationToken = token;
 
-			// Start the loop if needed
 			if (!this.isLoopRunning) {
 				this.fetchChat();
 			}
@@ -159,16 +162,13 @@ export class YoutubeChatV3 implements DurableObject {
 		}
 	}
 
-	// NOTE: No arguments. It always reads from this.nextContinuationToken
 	private async fetchChat() {
 		this.isLoopRunning = true; 
 		let currentInterval = BASE_CHAT_INTERVAL;
 
-		// Grab the current best token from the class
 		const tokenToUse = this.nextContinuationToken;
 
 		if (!tokenToUse) {
-			// If we lost the token, wait and try again (maybe init will provide one)
 			setTimeout(() => this.fetchChat(), 5000);
 			return;
 		}
@@ -190,7 +190,7 @@ export class YoutubeChatV3 implements DurableObject {
 						platform: "DESKTOP",
 					}
 				},
-				continuation: tokenToUse, // Use the class-level token
+				continuation: tokenToUse, 
 				currentPlayerState: { playerOffsetMs: "0" }
 			};
 
@@ -232,7 +232,6 @@ export class YoutubeChatV3 implements DurableObject {
 				}
 			}
 
-			// Update the Class Token with the new one found in response
 			const foundToken = traverseJSON(data, (value, key) => {
 				if (key === "continuation" && typeof value === "string") {
 					return value;
@@ -242,7 +241,6 @@ export class YoutubeChatV3 implements DurableObject {
 			if (foundToken) {
 				this.nextContinuationToken = foundToken;
 			}
-			// If no token found, we KEEP the old one (or the injected one), we don't null it out.
 
 			for (const action of actions) {
 				const id = this.getId(action);
@@ -259,7 +257,6 @@ export class YoutubeChatV3 implements DurableObject {
 			}
 			currentInterval = 5000;
 		} finally {
-			// Loop forever using whatever token is currently in the class
 			setTimeout(() => this.fetchChat(), currentInterval);
 		}
 	}
