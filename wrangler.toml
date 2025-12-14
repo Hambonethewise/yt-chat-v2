@@ -4,9 +4,9 @@ compatibility_date = "2024-01-01"
 
 [durable_objects]
 bindings = [
-  { name = "CHAT_DB", class_name = "YoutubeChatV3" }
+  { name = "CHAT_DB", class_name = "YoutubeChatV4" } # Changed to V4
 ]
 
 [[migrations]]
-tag = "v2-sqlite"
-new_sqlite_classes = ["YoutubeChatV3"]
+tag = "v3-sqlite-fix" # New unique tag
+new_sqlite_classes = ["YoutubeChatV4"] # Changed to V4
