@@ -20,21 +20,16 @@ export async function getVideoData(
 	let response: Response | undefined;
 	
 	for (const input of inputs) {
-		// --- CRASH PROOFING ---
-		// We extract the ID whether the input is a URL or a raw ID
 		let videoId = input;
 		try {
-			// If it looks like a URL, try to parse it
 			if (input.includes('youtube.com') || input.includes('youtu.be')) {
 				const urlObj = new URL(input);
 				videoId = urlObj.searchParams.get('v') || input;
 			}
 		} catch (e) {
-			// If it fails to parse as URL, assume it is already an ID
 			videoId = input;
 		}
 
-		// Now force the Popout URL which is safer for scraping
 		const url = `https://www.youtube.com/live_chat?is_popout=1&v=${videoId}`;
 		
 		try {
@@ -53,7 +48,6 @@ export async function getVideoData(
 
 	const text = await response.text();
 
-	// 1. SURGICAL EXTRACTION
 	const apiKeyMatch = /"INNERTUBE_API_KEY"\s*:\s*"([^"]+)"/.exec(text);
 	if (!apiKeyMatch) return err(['Scraper: Missing API Key', 500]);
 	const apiKey = apiKeyMatch[1];
@@ -65,10 +59,8 @@ export async function getVideoData(
 	const visitorMatch = /"VISITOR_DATA"\s*:\s*"([^"]+)"/.exec(text);
 	const visitorData = visitorMatch ? visitorMatch[1] : "";
 
-	// 2. INITIAL DATA (Popout structure)
 	let initialData = getMatch(text, /window\["ytInitialData"\]\s*=\s*({[\s\S]+?});/);
 	if (initialData.isErr()) {
-		// Fallback for standard structure
 		initialData = getMatch(text, /(?:var\s+ytInitialData|window\[['"]ytInitialData['"]\])\s*=\s*({[\s\S]+?});/);
 	}
 	
@@ -88,16 +80,43 @@ export function getContinuationToken(continuation: Continuation) {
 	return continuation[key]?.continuation;
 }
 
+// --- EMOTE PARSING FIX ---
 export function parseYTString(string?: YTString): string {
 	if (!string) return '';
 	if (string.simpleText) return string.simpleText;
-	if (string.runs)
+	
+	if (string.runs) {
 		return string.runs
 			.map((run) => {
-				if (isTextRun(run)) return run.text;
-				return run.emoji.emojiId;
+				// 1. If it's normal text, just return it
+				if (isTextRun(run)) {
+					return run.text;
+				} 
+				
+				// 2. If it's an Emoji/Sticker
+				if (run.emoji) {
+					// Try to get the shortcode (e.g. ":smile:")
+					if (run.emoji.searchTerms && run.emoji.searchTerms.length > 0) {
+						return run.emoji.searchTerms[0];
+					}
+					// Try to get the label (e.g. "Smile")
+					if (run.emoji.image?.accessibility?.accessibilityData?.label) {
+						return `:${run.emoji.image.accessibility.accessibilityData.label}:`;
+					}
+					// Try shortcuts (e.g. ":)")
+					if (run.emoji.shortcuts && run.emoji.shortcuts.length > 0) {
+						return run.emoji.shortcuts[0];
+					}
+					
+					// 3. FINAL FALLBACK:
+					// If we can't find a text name, return NOTHING.
+					// Do NOT return the emojiId (that causes the crash).
+					return ''; 
+				}
+				
+				return '';
 			})
-			.join('')
-			.trim();
+			.join(''); // Join without extra spaces, let the text runs handle spacing
+	}
 	return '';
 }
