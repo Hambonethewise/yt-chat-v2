@@ -3,10 +3,12 @@ import { getChannel } from './routes/channel';
 import { getStream } from './routes/stream';
 import { HandlerResult } from '@util/types';
 import { notFound } from '@util/util';
-export { YoutubeChatV3 } from './YoutubeChat';
+
+// --- THE FIX IS HERE ---
+// Changed V3 to V4 to match your new Durable Object class name
+export { YoutubeChatV4 } from './YoutubeChat'; 
 
 export interface Env {
-	// CHANGED VARIABLE NAME HERE
 	CHAT_DB: DurableObjectNamespace;
 	TRUFFLE_API_BASE: string;
 }
