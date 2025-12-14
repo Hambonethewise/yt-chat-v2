@@ -39,7 +39,6 @@ export async function createChatObject(
 	return object.fetch('http://youtube.chat/ws' + url.search, req);
 }
 
-// 3 seconds interval to keep Cloudflare happy
 const BASE_CHAT_INTERVAL = 3000;
 
 export class YoutubeChatV3 implements DurableObject {
@@ -50,6 +49,7 @@ export class YoutubeChatV3 implements DurableObject {
 	private clientVersion!: string;
 	private visitorData!: string;
 	private seenMessages = new Map<string, number>();
+	private loopCount = 0; // Track loops for pinging
 
 	constructor(private state: DurableObjectState, private env: Env) {
 		const r = Router<Request, IHTTPMethods>();
@@ -61,7 +61,7 @@ export class YoutubeChatV3 implements DurableObject {
 
 	private broadcast(data: any) {
 		for (const adapter of this.adapters.values()) {
-			// SILENCED DEBUG LOGS
+			// Debug logs are silenced
 			/*
 			if (data.debug) {
 				for (const socket of adapter.sockets) {
@@ -75,6 +75,15 @@ export class YoutubeChatV3 implements DurableObject {
 			if (!transformed) continue;
 			for (const socket of adapter.sockets) {
 				try { socket.send(transformed); } catch (e) {}
+			}
+		}
+	}
+
+	private sendPing() {
+		const pingData = JSON.stringify({ type: 'ping' });
+		for (const adapter of this.adapters.values()) {
+			for (const socket of adapter.sockets) {
+				try { socket.send(pingData); } catch (e) {}
 			}
 		}
 	}
@@ -127,7 +136,19 @@ export class YoutubeChatV3 implements DurableObject {
 		let nextToken = continuationToken;
 		let currentInterval = BASE_CHAT_INTERVAL;
 
+		// --- HEARTBEAT ---
+		// Every 10 loops (approx 30s), send a ping to keep connection alive
+		this.loopCount++;
+		if (this.loopCount % 10 === 0) {
+			this.sendPing();
+		}
+
 		try {
+			// --- TIMEOUT CONTROLLER ---
+			// If YouTube doesn't answer in 10s, we abort.
+			const controller = new AbortController();
+			const timeoutId = setTimeout(() => controller.abort(), 10000);
+
 			const payload = {
 				context: {
 					client: {
@@ -152,9 +173,12 @@ export class YoutubeChatV3 implements DurableObject {
 					method: 'POST', 
 					headers: COMMON_HEADERS, 
 					body: JSON.stringify(payload),
-					redirect: 'manual' 
+					redirect: 'manual',
+					signal: controller.signal // Link the timeout
 				}
 			);
+			
+			clearTimeout(timeoutId); // Clear timeout if successful
 
 			if (!res.ok) {
 				currentInterval = 5000; 
@@ -174,9 +198,6 @@ export class YoutubeChatV3 implements DurableObject {
 					}
 				}
 
-				// --- DEEP SEARCH FOR TOKEN ---
-				// Instead of trusting one path, we scan the whole object for the continuation string.
-				// This prevents the "Stale Token Loop".
 				const foundToken = traverseJSON(data, (value, key) => {
 					if (key === "continuation" && typeof value === "string") {
 						return value;
@@ -185,11 +206,6 @@ export class YoutubeChatV3 implements DurableObject {
 
 				if (foundToken) {
 					nextToken = foundToken;
-				} else {
-					// If absolutely no token found, we must keep the old one, 
-					// BUT usually this means we need to look closer.
-					// For now, defaulting to old is safer than crashing, 
-					// but the Deep Search above should catch 99% of cases.
 				}
 
 				for (const action of actions) {
@@ -202,6 +218,7 @@ export class YoutubeChatV3 implements DurableObject {
 				}
 			}
 		} catch (e: any) {
+			// If timeout or error, just wait and retry.
 			currentInterval = 5000;
 		} finally {
 			this.nextContinuationToken = nextToken;
