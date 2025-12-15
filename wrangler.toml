@@ -1,4 +1,4 @@
-name = "yt-chat-v2" # <--- NEW NAME = NEW WORKER
+name = "yt-chat-v2"
 main = "src/index.ts"
 compatibility_date = "2024-01-01"
 
@@ -8,5 +8,5 @@ bindings = [
 ]
 
 [[migrations]]
-tag = "v1-init" # Resetting to v1 for the new worker
+tag = "v1-sqlite"
 new_sqlite_classes = ["YoutubeChatV4"]
