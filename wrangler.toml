@@ -8,5 +8,8 @@ bindings = [
 ]
 
 [[migrations]]
-tag = "v1-sqlite"
+# IMPORTANT: Migration tags are append-only.
+# This script was initially deployed with tag "v1-init".
+# Keep it here so Wrangler doesn't try to re-apply migrations.
+tag = "v1-init"
 new_sqlite_classes = ["YoutubeChatV4"]
